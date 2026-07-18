@@ -124,6 +124,19 @@ CREATE TABLE IF NOT EXISTS appraisals (
 
 CREATE INDEX IF NOT EXISTS idx_appraisals_stock ON appraisals (stock_number, created_at);
 
+-- Tier 1 bulk sieve (score_damage.py): local YOLOv8s damage read for every
+-- listing, at zero API cost. One row per listing, refreshed on rescan.
+-- Feeds the dashboard's Shortlist view so Tier 2 (Claude, appraiser.py) is
+-- only spent on the cars worth it.
+CREATE TABLE IF NOT EXISTS damage_scores (
+    stock_number     TEXT PRIMARY KEY REFERENCES listings(stock_number),
+    scored_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    images_scanned   INT NOT NULL,
+    detection_count  INT NOT NULL,
+    area_score       NUMERIC NOT NULL,   -- avg damaged-area fraction across scanned photos
+    class_counts     JSONB NOT NULL      -- {"dent": 3, "scratch": 5, ...}
+);
+
 -- Convenience view: repairable write-offs ending soon (the hunting ground)
 CREATE OR REPLACE VIEW v_upcoming_repairables AS
 SELECT stock_number, title, year, series, badge, odometer, state, suburb,

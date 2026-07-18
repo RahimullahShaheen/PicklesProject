@@ -8,6 +8,7 @@ Usage:
 
 from __future__ import annotations
 
+import base64
 import os
 from pathlib import Path
 
@@ -31,6 +32,54 @@ def resolve_local_image(local_path: str | None) -> Path | None:
     if not path.is_absolute():
         path = BASE_DIR / path
     return path if path.exists() else None
+
+
+def image_src(local_path: str | None, cdn_url: str) -> tuple[str, bool]:
+    """Return (src, is_local) — a data: URI for local files, else the CDN URL."""
+    local = resolve_local_image(local_path)
+    if not local:
+        return cdn_url, False
+    mime = "image/png" if local.suffix.lower() == ".png" else "image/jpeg"
+    data = base64.b64encode(local.read_bytes()).decode()
+    return f"data:{mime};base64,{data}", True
+
+
+def render_image_carousel(stock_number: str, images: pd.DataFrame) -> None:
+    """A single square photo with prev/next slide buttons."""
+    if images.empty:
+        st.write("No images recorded.")
+        return
+
+    idx_key = f"img_idx_{stock_number}"
+    idx = st.session_state.get(idx_key, 0) % len(images)
+    img = images.iloc[idx]
+    src, is_local = image_src(img["local_path"], img["cdn_url"])
+
+    st.markdown(
+        f"""<div style="width:100%;aspect-ratio:1/1;overflow:hidden;
+                border-radius:10px;background:#111;">
+              <img src="{src}" style="width:100%;height:100%;object-fit:cover;" />
+            </div>""",
+        unsafe_allow_html=True,
+    )
+
+    prev_col, counter_col, next_col = st.columns([1, 2, 1])
+    if prev_col.button("◀", key=f"prev_{stock_number}", use_container_width=True):
+        st.session_state[idx_key] = (idx - 1) % len(images)
+        st.rerun()
+    counter_col.markdown(
+        f"<div style='text-align:center;padding-top:0.4rem;'>{idx + 1} / {len(images)}</div>",
+        unsafe_allow_html=True,
+    )
+    if next_col.button("▶", key=f"next_{stock_number}", use_container_width=True):
+        st.session_state[idx_key] = (idx + 1) % len(images)
+        st.rerun()
+
+    if not is_local:
+        st.caption(
+            "Shown from Pickles' CDN — not downloaded locally. "
+            "Run download_images.py to fetch it."
+        )
 
 
 def go_to_list() -> None:
@@ -107,6 +156,36 @@ def load_appraisals(stock_number: str) -> pd.DataFrame:
         )
 
 
+@st.cache_data(ttl=60)
+def load_shortlist() -> pd.DataFrame:
+    """Tier 1 ranking: every active, scored listing, least visible damage first."""
+    query = """
+        SELECT l.stock_number, l.title, l.make, l.model, l.year, l.wovr,
+               l.state, l.suburb, l.odometer, l.product_bid_end_utc,
+               d.images_scanned, d.detection_count, d.area_score, d.class_counts,
+               d.scored_at
+        FROM damage_scores d
+        JOIN listings l ON l.stock_number = d.stock_number
+        WHERE l.disappeared_at IS NULL
+        ORDER BY d.area_score ASC
+    """
+    with psycopg.connect(DATABASE_URL) as conn:
+        return pd.read_sql(query, conn)
+
+
+@st.cache_data(ttl=60)
+def scored_vs_total() -> tuple[int, int]:
+    with psycopg.connect(DATABASE_URL) as conn:
+        scored = conn.execute(
+            "SELECT count(*) FROM damage_scores d JOIN listings l "
+            "ON l.stock_number = d.stock_number WHERE l.disappeared_at IS NULL"
+        ).fetchone()[0]
+        total = conn.execute(
+            "SELECT count(*) FROM listings WHERE disappeared_at IS NULL"
+        ).fetchone()[0]
+    return scored, total
+
+
 def delete_listing(stock_number: str) -> None:
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
@@ -119,12 +198,26 @@ def delete_listing(stock_number: str) -> None:
     load_listings.clear()
 
 
+def render_nav() -> None:
+    """List/Shortlist switcher — shown in the sidebar on both non-detail pages."""
+    nav_col1, nav_col2 = st.sidebar.columns(2)
+    if nav_col1.button("📋 All Listings", use_container_width=True):
+        st.query_params.clear()
+        st.rerun()
+    if nav_col2.button("🎯 Shortlist", use_container_width=True):
+        st.query_params.clear()
+        st.query_params["view"] = "shortlist"
+        st.rerun()
+    st.sidebar.divider()
+
+
 # ----------------------------------------------------------------------
 # List page
 # ----------------------------------------------------------------------
 def render_list_page() -> None:
     df = load_listings()
 
+    render_nav()
     st.title("Pickles Salvage Listings")
 
     if df.empty:
@@ -184,11 +277,104 @@ def render_list_page() -> None:
 
 
 # ----------------------------------------------------------------------
+# Shortlist page (Tier 1: local YOLO damage sieve)
+# ----------------------------------------------------------------------
+def render_shortlist_page() -> None:
+    render_nav()
+    st.title("🎯 Shortlist — Tier 1 (local damage scan)")
+    st.caption(
+        "Ranked least-damaged first, from score_damage.py's local YOLOv8s scan "
+        "(no API cost). Use this to pick which cars are worth a Tier 2 Claude "
+        "appraisal, instead of browsing every listing."
+    )
+
+    scored, total = scored_vs_total()
+    st.write(f"**{scored} / {total}** active listings scored.")
+    if scored < total:
+        st.info(
+            f"{total - scored} active listing(s) not scanned yet. Run "
+            f"`python score_damage.py` to score them (or `--rescan` to redo all)."
+        )
+    if scored == 0:
+        return
+
+    shortlist_all = load_shortlist()
+
+    st.sidebar.header("Shortlist filters")
+    makes = st.sidebar.multiselect(
+        "Make", sorted(shortlist_all["make"].dropna().unique()), key="sl_make"
+    )
+    filtered = shortlist_all[shortlist_all["make"].isin(makes)] if makes else shortlist_all
+
+    # Model options depend on the Make filter — drop stale selections that no
+    # longer apply (e.g. switching Make away from a previously-picked model)
+    # before instantiating the widget, so Streamlit doesn't choke on a
+    # selected value outside the new options list.
+    valid_models = sorted(filtered["model"].dropna().unique())
+    if st.session_state.get("sl_model"):
+        st.session_state["sl_model"] = [
+            m for m in st.session_state["sl_model"] if m in valid_models
+        ]
+    models = st.sidebar.multiselect("Model", valid_models, key="sl_model")
+    if models:
+        filtered = filtered[filtered["model"].isin(models)]
+
+    wovr = st.sidebar.multiselect(
+        "WOVR status", sorted(shortlist_all["wovr"].dropna().unique()), key="sl_wovr"
+    )
+    states = st.sidebar.multiselect(
+        "State", sorted(shortlist_all["state"].dropna().unique()), key="sl_state"
+    )
+    search = st.sidebar.text_input("Search title", key="sl_search")
+
+    if wovr:
+        filtered = filtered[filtered["wovr"].isin(wovr)]
+    if states:
+        filtered = filtered[filtered["state"].isin(states)]
+    if search:
+        filtered = filtered[filtered["title"].str.contains(search, case=False, na=False)]
+
+    limit = st.slider("Shortlist size", min_value=5, max_value=50, value=30, step=5)
+    shortlist = filtered.head(limit)
+
+    st.write(
+        f"**{len(filtered)}** scored listing(s) match your filters — "
+        f"showing the {len(shortlist)} least-damaged."
+    )
+
+    display_cols = ["stock_number", "title", "year", "wovr", "state", "suburb",
+                     "odometer", "detection_count", "area_score",
+                     "images_scanned", "product_bid_end_utc"]
+    event = st.dataframe(
+        shortlist[display_cols].rename(columns={
+            "detection_count": "damage detections",
+            "area_score": "damage area score (lower = cleaner)",
+            "images_scanned": "photos scanned",
+        }),
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+    )
+
+    selected_rows = event.selection.rows if event and event.selection else []
+    if selected_rows:
+        stock_number = shortlist.iloc[selected_rows[0]]["stock_number"]
+        go_to_detail(stock_number)
+
+
+# ----------------------------------------------------------------------
 # Detail page
 # ----------------------------------------------------------------------
 def render_detail_page(stock_number: str) -> None:
     df = load_listings()
     matches = df[df["stock_number"] == stock_number]
+
+    st.sidebar.header("Navigation")
+    if st.sidebar.button("⬅ Back to list", key="sidebar_back", use_container_width=True):
+        go_to_list()
+    st.sidebar.write(f"Stock number: **{stock_number}**")
+
     if matches.empty:
         st.error(f"Stock number {stock_number} not found (it may have been deleted).")
         if st.button("⬅ Back to list"):
@@ -254,27 +440,14 @@ def render_detail_page(stock_number: str) -> None:
             "Last seen": row["last_seen_at"],
             "Disappeared at": row["disappeared_at"],
         }
-        st.table(pd.DataFrame(detail_fields.items(), columns=["Field", "Value"]))
+        st.table(pd.DataFrame(
+            [(k, str(v)) for k, v in detail_fields.items()],
+            columns=["Field", "Value"],
+        ))
 
     with right:
         st.subheader("Images")
-        images = load_images(stock_number)
-        if len(images):
-            missing = 0
-            for _, img in images.iterrows():
-                local = resolve_local_image(img["local_path"])
-                if local:
-                    st.image(str(local), use_container_width=True)
-                else:
-                    missing += 1
-                    st.image(img["cdn_url"], use_container_width=True)
-            if missing:
-                st.caption(
-                    f"{missing} image(s) shown from Pickles' CDN — not yet "
-                    f"downloaded locally. Run download_images.py to fetch them."
-                )
-        else:
-            st.write("No images recorded.")
+        render_image_carousel(stock_number, load_images(stock_number))
 
     st.subheader("Price history")
     history = load_price_history(stock_number)
@@ -322,8 +495,12 @@ def render_detail_page(stock_number: str) -> None:
 
 
 # ----------------------------------------------------------------------
+st.sidebar.title("🚗 Pickles Salvage")
+
 selected_stock = st.query_params.get("stock")
 if selected_stock:
     render_detail_page(selected_stock)
+elif st.query_params.get("view") == "shortlist":
+    render_shortlist_page()
 else:
     render_list_page()

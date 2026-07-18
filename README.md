@@ -157,6 +157,46 @@ Uses `claude-sonnet-5` for the vision step (good damage-assessment quality
 at Sonnet cost — swap `MODEL` in `appraiser.py` for `claude-opus-4-8` if you
 want maximum accuracy on subtle damage and don't mind ~5-8x the cost).
 
+## Two-tier damage sieve (score_damage.py + appraiser.py)
+
+Claude vision costs real money per car. `score_damage.py` is a free, local
+Tier 1 pass so you only spend Tier 2 (Claude) on cars worth it.
+
+- **Tier 1 — `score_damage.py`.** Runs `abdullahg7/cardd-yolov8s` (a YOLOv8s
+  model fine-tuned on the CarDD dataset — 6 damage classes: dent, scratch,
+  crack, glass_shatter, lamp_broken, tire_flat) locally over every active
+  listing's photos. Zero API cost, uses your GPU if available (falls back to
+  CPU). Produces a crude damage score per listing — detection count + average
+  damaged-area fraction across photos — stored in the `damage_scores` table.
+  Manual trigger, no schedule:
+  ```bash
+  export DATABASE_URL=postgresql://localhost/pickles
+  python score_damage.py               # score listings not yet scored
+  python score_damage.py --rescan       # rescan every active listing
+  python score_damage.py --limit 50     # cap how many listings this run
+  ```
+  Model weights (~45MB) download once via `huggingface_hub` and cache
+  locally. License: AGPL-3.0 (inherited from the Ultralytics YOLOv8
+  framework) — fine for personal local use; matters only if you ever host
+  this as a public network service.
+- **Tier 2 — `appraiser.py`.** Unchanged — the full Claude vision rubric,
+  triggered manually per car (CLI or dashboard button), not automated over
+  the whole shortlist.
+- **Dashboard "🎯 Shortlist" view** ranks active, scored listings by damage
+  score — **least damage first** (the easiest-flip theory: prioritize
+  cars with the least visible damage within your WOVR/make/km scope, over
+  near-pristine cars with nothing to flip or heavily wrecked ones heading
+  toward parts-only). Click a row to open the same detail page, from which
+  you can run the Tier 2 appraisal if it looks worth it.
+
+Note: this was designed for a much larger, unfiltered collection scope
+(thousands of listings) where a bulk sieve actually earns its keep. With the
+current narrowed scope (~207 listings, QLD/Brisbane + 9 brands + 2 WOVR
+types), it still works as a damage-severity ranking, just doesn't do much
+*sieving* since 207 rows is already small enough to skim by eye. Widen
+`request_payload.json`'s filter if you want Tier 1 to do real bulk-narrowing
+work again.
+
 ## Current collection scope
 
 `request_payload.json`'s `filter` is currently narrowed (edited by hand,

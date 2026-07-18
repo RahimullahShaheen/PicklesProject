@@ -42,6 +42,43 @@ fresh machine needs `~/.streamlit/credentials.toml` with an empty email
 pre-set, otherwise Streamlit blocks on a stdin prompt when launched
 non-interactively.
 
+## Two-tier damage sieve: score_damage.py (added 2026-07-18)
+
+Local Tier 1 pass before spending Claude API money on Tier 2 (`appraiser.py`).
+`score_damage.py` runs `abdullahg7/cardd-yolov8s` (Hugging Face — YOLOv8s
+fine-tuned on the CarDD dataset, 6 damage classes) locally over every active
+listing's photos, zero API cost, producing a `damage_scores` row per listing
+(detection count + avg damaged-area fraction). Dashboard's new "🎯 Shortlist"
+view ranks by that score, **least damage first** (user's choice — easiest-flip
+theory, not "find the worst damage").
+
+**GPU gotcha hit and fixed:** this machine has an RTX 3050 with a pre-existing
+CUDA-enabled `torch==2.6.0+cu124` (used by some other project — `torchaudio`
+was pinned to that exact version). `pip install ultralytics` pulled in a
+fresh CPU-only `torch==2.13.0+cpu` as a transitive dependency, silently
+downgrading GPU support machine-wide. Fixed by reinstalling the exact prior
+version: `pip install torch==2.6.0 torchvision --index-url
+https://download.pytorch.org/whl/cu124`. **If any future package pulls in
+torch again, check `torch.cuda.is_available()` afterward** — pip's resolver
+doesn't protect CUDA builds from being silently replaced by CPU builds.
+
+**Another gotcha:** ultralytics' `model.predict(source=<url>)` downloads
+the image to the *current working directory* with no cleanup when given a
+URL string — left 36 stray `.jpeg` files in the project root during testing.
+Fixed by fetching photos into memory with `httpx` (same pattern as
+`appraiser.py`) and passing PIL Image objects to `predict()` instead of raw
+URLs — never touches disk.
+
+**Scope note:** the user's original ask assumed ~4,440 listings (a bulk
+sieve makes most sense at that scale); the live DB is still the ~207-row
+narrowed scope from the collection-scope memory below. User chose to keep
+the narrow scope for now — Tier 1 still works as a ranking, just isn't doing
+much real sieving at 207 rows. Revisit if they want to widen scope later.
+
+**Model licensing:** AGPL-3.0 (inherited from Ultralytics YOLOv8). Fine for
+personal local use; would matter if this were ever hosted as a public
+network service.
+
 ## appraiser.py — bidding pipeline (added 2026-07-18)
 
 Full workflow: collect (`collector.py`) -> watch (snapshots + `sale_results`)
