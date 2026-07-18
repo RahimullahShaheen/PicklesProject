@@ -1,0 +1,30 @@
+{
+  "_comment": "ALL VALUES ARE STARTING-POINT PLACEHOLDERS IN AUD. Replace with your real numbers: Pickles' current fee schedule (pickles.com.au/fees), your transport quotes, your actual repair rates. The whole point of this design is that these are YOUR economics.",
+
+  "economics": {
+    "target_margin": 0.25,
+    "buyer_fee_pct": 0.075,
+    "buyer_fee_fixed": 250,
+    "transport": 600,
+    "wovr_inspection_rego": 1200,
+    "risk_buffer_base": 800,
+    "flag_engine_no_start": 1500,
+    "flag_no_keys": 700,
+    "flag_odometer_unknown": 500,
+    "flag_not_driveable": 800,
+    "hidden_risk_scale": 3000,
+    "min_worthwhile_bid": 1500
+  },
+
+  "repair_costs": {
+    "panel_repair": 450,
+    "panel_replace": 900,
+    "paint_per_panel": 450,
+    "airbag_set": 3500,
+    "glass_each": 450,
+    "wheel_each": 350,
+    "light_each": 500,
+    "mechanical_provision": 1500,
+    "interior_provision": 800
+  }
+}
